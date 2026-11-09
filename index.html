@@ -118,7 +118,7 @@ let wins=parseInt(localStorage.getItem('akedo_wins')||'0',10);
 let points=parseInt(localStorage.getItem('akedo_points')||'0',10);
 let myName=localStorage.getItem('akedo_name')||'';
 let owned=JSON.parse(localStorage.getItem('akedo_owned')||'[0]');
-let playerIdx=0,player,enemy,myTurn=true,isOnline=false,isHost=false,peer=null,roomConn=null,gameConn=null,connectionTimeout=null,connectionTimedOut=false,roomCode='',myPeerId='',isRoomHost=false,roomMembers=[],pendingChallenge=null,roomMatch=null,activeMatch=null,pendingDirectMatch=null,defending=false,enemyDefending=false,splitUsed=false,gameOver=false;
+let playerIdx=0,player,enemy,myTurn=true,isOnline=false,isHost=false,peer=null,roomConn=null,connectionTimeout=null,connectionTimedOut=false,roomCode='',myPeerId='',isRoomHost=false,roomMembers=[],pendingChallenge=null,roomMatch=null,activeMatch=null,pendingDirectMatch=null,defending=false,enemyDefending=false,splitUsed=false,gameOver=false;
 
 function save(){
  localStorage.setItem('akedo_coins',coins);localStorage.setItem('akedo_wins',wins);localStorage.setItem('akedo_points',points);localStorage.setItem('akedo_owned',JSON.stringify(owned));
@@ -202,19 +202,17 @@ function render(){
 function clearConnectionTimeout(){if(connectionTimeout){clearTimeout(connectionTimeout);connectionTimeout=null;}}
 function setConnectionStatus(message){document.getElementById('connectionStatus').textContent=message;}
 const MAX_ROOM_PLAYERS=6;
-function startConnectionTimeout(message,onTimeout,preservePeer=false){
+function startConnectionTimeout(message,onTimeout){
  clearConnectionTimeout();connectionTimedOut=false;
  connectionTimeout=setTimeout(()=>{
   connectionTimeout=null;connectionTimedOut=true;
-  if(preservePeer){if(gameConn){gameConn.close();gameConn=null;}}
-  else{const pendingPeer=peer;peer=null;roomConn=null;gameConn=null;isOnline=false;if(pendingPeer)pendingPeer.destroy();}
+  const pendingPeer=peer;peer=null;roomConn=null;isOnline=false;if(pendingPeer)pendingPeer.destroy();
   onTimeout();
  },30000);
  setConnectionStatus(message);setLobbyStatus(message);
 }
 function closePeer(){
  clearConnectionTimeout();connectionTimedOut=false;
- if(gameConn){gameConn.close();gameConn=null;}
  if(roomConn){roomConn.close();roomConn=null;}
  if(peer){peer.destroy();peer=null;}
  isOnline=false;isRoomHost=false;roomCode='';myPeerId='';roomMembers=[];pendingChallenge=null;roomMatch=null;activeMatch=null;pendingDirectMatch=null;
@@ -286,6 +284,9 @@ function handleHostRoomMessage(senderId,message,sourceConnection){
   if(!roomMatch||roomMatch.id!==message.matchId||!roomMatch.players.includes(senderId))return;
   const opponent=roomMatch.players.find(id=>id!==senderId);sendLobbyMessage(opponent,{type:'match-ended',matchId:roomMatch.id});
   roomMatch.players.forEach(id=>{const member=memberById(id);if(member)member.inBattle=false;});roomMatch=null;broadcastRoomState();
+ }else if(message.type==='match-attack'){
+  if(!roomMatch||roomMatch.id!==message.matchId||!roomMatch.players.includes(senderId)||![1,2,3,4].includes(message.attack))return;
+  const opponent=roomMatch.players.find(id=>id!==senderId);sendLobbyMessage(opponent,message);
  }
 }
 function handleClientRoomMessage(message){
@@ -294,34 +295,19 @@ function handleClientRoomMessage(message){
   roomMembers=Array.isArray(message.members)?message.members:[];pendingChallenge=message.pendingChallenge||null;renderLobby();setLobbyStatus('שחקנים בחדר: '+roomMembers.length+' / '+MAX_ROOM_PLAYERS);
  }else if(message.type==='challenge-start'){
   pendingDirectMatch=message.match;activeMatch=message.match;renderLobby();
-  if(message.initiator)startDirectMatch(message.match,true);
-  else startConnectionTimeout('האתגר התקבל. מתחבר ליריב...',()=>{setLobbyStatus('החיבור לקרב נכשל. נסה שוב מהלובי.');returnToLobby(true);},true);
+  startOnlineBattle(message.match.opponent.warrior,!!message.initiator);
+ }else if(message.type==='match-attack'&&pendingDirectMatch&&pendingDirectMatch.id===message.matchId){
+  if([1,2,3,4].includes(message.attack))receiveAttack(message.attack);
  }else if(message.type==='challenge-error')setLobbyStatus(message.text);
  else if(message.type==='room-full'){closePeer();showMenu();setConnectionStatus('החדר מלא (מקסימום 6 שחקנים).');}
  else if(message.type==='room-closed'){closePeer();showMenu();setConnectionStatus('המארח סגר את החדר.');}
  else if(message.type==='match-ended'&&pendingDirectMatch&&pendingDirectMatch.id===message.matchId)returnToLobby(false);
 }
 function handlePeerConnection(connection){
- if(connection.metadata&&connection.metadata.type==='game'){
-  if(!pendingDirectMatch||connection.metadata.matchId!==pendingDirectMatch.id){connection.close();return;}
-  setupGameConnection(connection,pendingDirectMatch,false);return;
- }
  if(!isRoomHost){connection.close();return;}
  connection.on('data',message=>handleHostRoomMessage(connection.peer,message,connection));
  connection.on('close',()=>handleHostRoomMessage(connection.peer,{type:'leave'},connection));
  connection.on('error',error=>setLobbyStatus('שגיאת חיבור: '+error.message));
-}
-function setupGameConnection(connection,match,initiator){
- gameConn=connection;
- connection.on('open',()=>{clearConnectionTimeout();connectionTimedOut=false;startOnlineBattle(match.opponent.warrior,initiator);});
- connection.on('data',message=>{if(message&&message.type==='attack'&&Number.isInteger(message.attack))receiveAttack(message.attack);});
- connection.on('close',()=>{if(isOnline&&!gameOver)returnToLobby(false);});
- connection.on('error',error=>{setLobbyStatus('שגיאת קרב: '+error.message);if(isOnline)returnToLobby(true);});
-}
-function startDirectMatch(match,initiator){
- if(!peer||!match||!match.opponent)return;
- startConnectionTimeout('מתחבר ליריב...',()=>{setLobbyStatus('החיבור לקרב נכשל. נסה שוב מהלובי.');returnToLobby(true);},true);
- if(initiator){const connection=peer.connect(match.opponent.id,{metadata:{type:'game',matchId:match.id}});setupGameConnection(connection,match,true);}
 }
 function requestChallenge(targetId){const message={type:'challenge',targetId:targetId};if(isRoomHost)handleHostRoomMessage(myPeerId,message);else if(roomConn&&roomConn.open)roomConn.send(message);}
 function acceptChallenge(){if(isRoomHost)handleHostRoomMessage(myPeerId,{type:'accept-challenge'});else if(roomConn&&roomConn.open)roomConn.send({type:'accept-challenge'});}
@@ -336,7 +322,6 @@ function returnToLobby(notifyHost){
  const matchId=pendingDirectMatch&&pendingDirectMatch.id;clearConnectionTimeout();
  if(notifyHost&&matchId){if(isRoomHost)handleHostRoomMessage(myPeerId,{type:'match-ended',matchId});else if(roomConn&&roomConn.open)roomConn.send({type:'match-ended',matchId});}
  isOnline=false;gameOver=false;
- if(gameConn){const current=gameConn;gameConn=null;current.close();}
  pendingDirectMatch=null;activeMatch=null;showLobby();setLobbyStatus('שחקנים בחדר: '+roomMembers.length+' / '+MAX_ROOM_PLAYERS);
 }
 function leaveRoom(){
@@ -382,8 +367,12 @@ function sendAttack(type){
  if(!myTurn||gameOver)return;
  if(type===4&&splitUsed){document.getElementById('log').textContent='כבר השתמשת ב-SPLIT STRIKE!';return;}
  doAttack(type,true);
- if(isOnline&&gameConn&&gameConn.open)gameConn.send({type:'attack',attack:type});
- else if(!gameOver){myTurn=false;updateTurnUI();setTimeout(enemyOfflineTurn,800);}
+ if(isOnline&&pendingDirectMatch){
+  const message={type:'match-attack',matchId:pendingDirectMatch.id,attack:type};
+  if(isRoomHost)handleHostRoomMessage(myPeerId,message);
+  else if(roomConn&&roomConn.open)roomConn.send(message);
+  else document.getElementById('log').textContent='החיבור ללובי אבד.';
+ }else if(!gameOver){myTurn=false;updateTurnUI();setTimeout(enemyOfflineTurn,800);}
 }
 function doAttack(type,isMe){
  const log=document.getElementById('log');const attacker=isMe?player:enemy;const defender=isMe?enemy:player;const isDefending=isMe?enemyDefending:defending;
